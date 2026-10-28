@@ -13,17 +13,17 @@
 #
 # DECISION (founder, 2026-09-26): admin SSH has exactly two identity-gated
 # paths — Cloudflare Access SSH and Tailscale SSH. Direct SSH by public IP is
-# denied. Recorded in ARCHITECTURE §6/§18 and the CONTEXT_HYBRID change log.
+# denied. Keep this repository README aligned if this access model changes.
 #
 # ACCEPTED INTERIM RISKS:
 #  - The SSH-over-tunnel path authenticates at the Cloudflare Access edge
 #    (Access app policy: named users, MFA/passkey, short session). The origin
 #    does not validate Cf-Access-Jwt-Assertion for TCP/SSH; HTTP-surface JWT
 #    validation is the Phase 5 gate.
-#  - If UFW (scripts/hardenning.sh) is still active, its "allow 22/tcp" rule is
+#  - If UFW (secure-vps.sh) is still active, its "allow 22/tcp" rule is
 #    superseded by this guard chain (a drop in any base chain is final), but
 #    two firewall managers must not persist: after confirming, follow
-#    scripts/README.md Step 3 to migrate to the reviewed nftables policy and
+#    the README guidance to migrate to the reviewed nftables policy and
 #    then `ufw disable` — only after `systemctl enable nftables` + a reboot test.
 #  - Loopback is trusted for the tunnel path; off-box traffic cannot source
 #    loopback, so no further uid/ip narrowing on lo.
@@ -54,7 +54,6 @@ JOBFILE="${BACKUP_DIR}/rollback-job"
 TABLE="ssh_guard"
 TAILSCALE_IF="${TAILSCALE_IF:-tailscale0}"
 LOG_PREFIX="ssh-guard-drop: "
-ROLLBACK_MODE=nft
 
 log() { printf '[restrict-ssh] %s\n' "$*"; }
 die() { printf '[restrict-ssh] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -96,10 +95,7 @@ snapshot_known_good() {
   # a bare 'nft -f' rollback fires but restores nothing. Validate the
   # snapshot; if it is not nft-loadable, the rollback path falls back to
   # 'flush ruleset' + UFW restart (see rollback.sh / do_rollback).
-  if nft -c -f "${GOOD}" >/dev/null 2>&1; then
-    ROLLBACK_MODE=nft
-  else
-    ROLLBACK_MODE=compat
+  if ! nft -c -f "${GOOD}" >/dev/null 2>&1; then
     log "WARNING: known-good snapshot contains iptables-nft compat expressions (UFW active). Rollback will use the resilient path (flush + UFW restart)."
   fi
 }
@@ -125,7 +121,9 @@ schedule_rollback() {
   # outdated baseline over a confirmed state — panel finding).
   local oldjob
   oldjob=$(cat "${JOBFILE}" 2>/dev/null || true)
-  [[ -n "${oldjob}" ]] && atrm "${oldjob}" 2>/dev/null || true
+  if [[ -n "${oldjob}" ]]; then
+    atrm "${oldjob}" 2>/dev/null || true
+  fi
   # REAL-TEST FINDING (sandbox battery 2026-09-26): at 3.2.x prints its
   # 'job N at ...' confirmation to STDERR, so 'at | awk' captured nothing and
   # apply aborted. Schedule, then read the id from atq (highest id = ours).
@@ -141,7 +139,7 @@ do_apply() {
   # Warn (do not fail) if UFW is active — its allow-22 rule is superseded by
   # this guard chain, but the UFW layer must be retired after migration.
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-    log "WARNING: UFW is active. Its 'allow 22/tcp' is superseded by this guard chain (a drop in any base chain is final), but retire UFW after the Phase 0.3 nftables migration (scripts/README.md Step 3)."
+    log "WARNING: UFW is active. Its 'allow 22/tcp' is superseded by this guard chain (a drop in any base chain is final), but retire UFW after the Phase 0.3 nftables migration documented in README.md."
   fi
 
   mkdir -p "${BACKUP_DIR}"
@@ -185,8 +183,8 @@ do_apply() {
   fi
 
   # 4. Idempotency: drop a previous guard table before re-applying.
-  if nft list table "inet ${TABLE}" >/dev/null 2>&1; then
-    nft delete table "inet ${TABLE}"
+  if nft list table inet "${TABLE}" >/dev/null 2>&1; then
+    nft delete table inet "${TABLE}"
   fi
   nft -f "${CONF}.guard" || die "apply failed — run: sudo $0 rollback"
   rm -f "${CONF}.guard"
@@ -231,12 +229,12 @@ do_rollback() {
 
 do_status() {
   require_root
-  if nft list table "inet ${TABLE}" >/dev/null 2>&1; then
-    nft list table "inet ${TABLE}"
+  if nft list table inet "${TABLE}" >/dev/null 2>&1; then
+    nft list table inet "${TABLE}"
   else
     log "no ${TABLE} table present"
   fi
-  journalctl -k --since "-30 min" 2>/dev/null | grep "ssh-guard-drop" | tail -n 10 || true
+  journalctl -k --since "-30 min" 2>/dev/null | grep -F "${LOG_PREFIX}" | tail -n 10 || true
 }
 
 
