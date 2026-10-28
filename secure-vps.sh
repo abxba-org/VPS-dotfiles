@@ -22,6 +22,7 @@ SSH_DROPIN=/etc/ssh/sshd_config.d/00-vps-hardening.conf
 SSH_BACKUP_FILE=
 SSH_DROPIN_EXISTED=0
 SSH_CONTEXT=
+APT_UPDATED=0
 
 usage() {
   cat <<EOF
@@ -560,7 +561,10 @@ install_package() {
   local package=$1
   if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
     printf 'Installing %s (without a full system upgrade)...\n' "$package"
-    (umask 022; apt-get update)
+    if ((!APT_UPDATED)); then
+      (umask 022; apt-get update)
+      APT_UPDATED=1
+    fi
     (umask 022; DEBIAN_FRONTEND=noninteractive apt-get install -y "$package")
   fi
 }
@@ -618,7 +622,7 @@ apply_firewall() {
 
   install -d -m 0750 "${PORTS_FILE%/*}"
   local manifest_tmp
-  manifest_tmp=$(mktemp "${PORTS_FILE}.XXXXXX")
+  manifest_tmp=$(mktemp "${PORTS_FILE}.XXXXXX") || die 'Could not create a temporary firewall manifest file.'
   {
     [[ -r $PORTS_FILE ]] && cat "$PORTS_FILE"
     printf '%s\n' "${FIREWALL_RULES[@]}"
